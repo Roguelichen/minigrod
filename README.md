@@ -50,7 +50,7 @@ Minigrod customizes it's offensive line of scrimmage in an attempt to get the mo
 Minigrod does not yet understand situations where it might be advantageous to blitz the ball carrier or another player free.
 
 ### Better screening, caging, and ball safety
-Minigrod is unable to recognize what parts of the field can secured with a screen or a cage, where to put the ball carrier, or whether a corner of the cage is needed.
+Minigrod is unable to recognize what parts of the field can be secured with a screen or a cage, where to put the ball carrier, or whether a corner of the cage is needed.
 
 ### Move Importance
 Minigrod cannot tell how 'important' a move is to its general goal. It needs to be able to tell the difference between a critical dodge with the ball carrier and meaningless 2 dice block on the other side of the field at the end of its turn.
