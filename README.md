@@ -1,6 +1,6 @@
 # Minigrod
 
-Minigrod is a blood bowl playing ai developed for the 2020 Bot Bowl competition. It is based on the 2019 winner, Grod Bot, but with a number of improvements.
+Minigrod is a blood bowl playing ai developed for the 2020 Bot Bowl competition (https://njustesen.github.io/ffai/bot-bowl-ii). It is based on the 2019 winner, Grod Bot, but with a number of improvements.
 
 
 ## Improvements
