@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
 """
+Minigrod modified from example Grodbot code (https://github.com/njustesen/ffai/blob/master/examples/grodbot.py)
+
+
+Original Doc for Grodbot:
 ==========================
 Author: Peter Moore / Kevin Glass
 Year: 2019
@@ -17,7 +21,6 @@ from ffai.core.model import *
 from ffai.core.procedure import *
 from ffai.core.table import *
 from ffai.core.game import Game
-from ffai.ai.registry import register_bot
 import time
 import copy
 from functools import lru_cache
@@ -165,18 +168,8 @@ class FFTileMap:
         return (x <= 0) or (y <= 0) or (x >= self.width - 1) or (y >= self.height - 1) or is_occupied
 
 
-    def get_prob(self, mover: FFMover, sx: int, sy: int, tx: int, ty: int, ag, dodge_skill) -> float:
-        #square_from = self.game.get_square(sx, sy)
-        #square_to = self.game.get_square(tx, ty)
+    def get_move_prob(self, mover: FFMover):
         moving_unit = mover.player
-
-        xy_from = (sx, sy)
-        xy_to = (tx, ty)
-        # A huge speed up if we can cache this function call
-        #dodge_prob = 1.0
-        #dodge_prob = self.dodge_prob(moving_unit, square_from, square_to, allow_dodge_reroll=mover.allow_skill_reroll)
-        dodge_prob = self.proxy_get_dodge_prob(self.game, moving_unit, xy_from, xy_to, ag, dodge_skill)
-        #dodge_prob = .99
         move_prob = 1.0
         cur_depth: int = mover.cur_depth  # essentially number of moves already done.
         if cur_depth != -1 and (cur_depth + 1 > self.num_moves_left(moving_unit, include_gfi=False)):
@@ -185,12 +178,28 @@ class FFTileMap:
                 move_prob = 4.0 / 6.0
             if mover.allow_skill_reroll and moving_unit.has_skill(Skill.SURE_FEET):
                 move_prob = 1 - ((1 - move_prob) * (1 - move_prob))
+        return move_prob
+
+    @lru_cache(maxsize=400)
+    def get_prob(self, mover: FFMover, sx: int, sy: int, tx: int, ty: int, ag, dodge_skill) -> float:
+        #square_from = self.game.get_square(sx, sy)
+        #square_to = self.game.get_square(tx, ty)
+
+        moving_unit = mover.player
+        xy_from = (sx, sy)
+        xy_to = (tx, ty)
+        # A huge speed up if we can cache this function call
+        #dodge_prob = 1.0
+        #dodge_prob = self.dodge_prob(moving_unit, square_from, square_to, allow_dodge_reroll=mover.allow_skill_reroll)
+        dodge_prob = self.proxy_get_dodge_prob(self.game, moving_unit, xy_from, xy_to, ag, dodge_skill)
+        #dodge_prob = .99
+
         pickup_prob = 1.0
         ball_position = self.game.get_ball_position()
         if ball_position.x == tx and ball_position.y == ty:
             pickup_prob = self.game.get_pickup_prob(moving_unit, self.game.get_square(tx, ty))
 
-        return move_prob * dodge_prob * pickup_prob
+        return dodge_prob * pickup_prob
 
     @lru_cache(maxsize=400)
     def num_moves_left(self, player, include_gfi=False):
@@ -223,8 +232,8 @@ class FFTileMap:
 class FFPathFinder:
 
     def __init__(self, tile_map: FFTileMap, max_search_distance: int):
-        self.open: SortedList = SortedList(lambda x: x.prob)
-        self.closed: List[Node] = []
+        self.open: set[Node] = set()
+        self.closed: set[Node] = set()
         self.tile_map: FFTileMap = tile_map
         self.max_search_distance: int = max_search_distance
         self.nodes: List[List[Node]] = []
@@ -256,7 +265,8 @@ class FFPathFinder:
         self.nodes[sx][sy].depth = 0
         self.closed.clear()
         self.open.clear()
-        self.open.append(self.nodes[sx][sy])
+        #self.open.append(self.nodes[sx][sy])
+        self.open.add(self.nodes[sx][sy])
 
         if tx is not None and ty is not None:
             self.nodes[tx][ty].parent = None
@@ -264,11 +274,14 @@ class FFPathFinder:
         # Make a set of goals found
         goals = set()
 
+        prob_dict = {}
+
         # while we haven't exceeded our max search depth
         while len(self.open) != 0:
             # pull out the first node in our open list, this is determined to
             # be the most likely to be the next step based on our heuristic
-            current = self.get_first_in_open()
+            #current = self.get_first_in_open()
+            current = self.open.pop()
 
             if tx is not None and ty is not None and current == self.nodes[tx][ty]:
                 goals.add(self.tile_map.game.get_square(tx, ty))
@@ -279,7 +292,7 @@ class FFPathFinder:
             if player is not None and player.position.distance(current) == 1:
                 goals.add(self.tile_map.game.get_square(current.x, current.y))
 
-            self.remove_from_open(current)
+            #self.remove_from_open(current)
             self.add_to_closed(current)
 
             if current.moves == self.max_search_distance:
@@ -305,7 +318,17 @@ class FFPathFinder:
                 if self.is_valid_location(mover, sx, sy, xp, yp) and current.prob > CUTOFF_THRESHOLD:
                     mover.cur_depth = current.depth
                     #next_step_prob = 1.0
-                    next_step_prob = current.prob * self.tile_map.get_prob(mover, current.x, current.y, xp, yp, ag, dodge_skill)
+                    #x1, y1, x2, y2 = current.x, current.y, xp, yp
+                    #coord_key = (x1, y1, x2, y2)
+                    #if not coord_key in prob_dict:
+                        #next_step_prob = current.prob * self.tile_map.get_prob(mover, x1, y1, x2, y2, ag, dodge_skill)
+                    #else:
+                        #next_step_prob = prob_dict[coord_key]
+
+                    x1, y1, x2, y2 = current.x, current.y, xp, yp
+                    next_step_prob = current.prob * self.tile_map.get_prob(mover, x1, y1, x2, y2, ag, dodge_skill)
+                    next_step_prob *= self.get_move_prob(mover)
+
                     next_step_moves = current.moves + 1
                     neighbour = self.nodes[xp][yp]
                     self.tile_map.path_finder_visited(xp, yp)
@@ -367,13 +390,15 @@ class FFPathFinder:
         self.nodes[sx][sy].moves = 0
         self.closed.clear()
         self.open.clear()
-        self.open.append(self.nodes[sx][sy])  # Start with starting node.
+        #self.open.append(self.nodes[sx][sy])  # Start with starting node.
+        self.open.add(self.nodes[sx][sy])
         ag = mover.player.get_ag()
         dodge_skill = mover.player.has_skill(Skill.DODGE)
 
         while len(self.open) > 0:
-            current = self.get_first_in_open()
-            self.remove_from_open(current)
+            #current = self.get_first_in_open()
+            current = self.open.pop()
+            #self.remove_from_open(current)
             self.add_to_closed(current)
             if current.moves == self.max_search_distance:
                 continue
@@ -390,6 +415,7 @@ class FFPathFinder:
                     mover.cur_depth = current.depth
                     #next_step_prob = 1.0
                     next_step_prob = current.prob * self.tile_map.get_prob(mover, current.x, current.y, xp, yp, ag, dodge_skill)
+                    next_step_prob *= self.tile_map.get_move_prob(mover)
                     next_step_moves = current.moves + 1
                     neighbour = self.nodes[xp][yp]
                     self.tile_map.path_finder_visited(xp, yp)
@@ -430,16 +456,19 @@ class FFPathFinder:
         return self.open.first()
 
     def add_to_open(self, node: Node):
-        self.open.append(node)
+        #self.open.append(node)
+        self.open.add(node)
 
     def in_open_list(self, node: Node) -> bool:
-        return self.open.contains(node)
+        return node in self.open
+        #return self.open.contains(node)
 
     def remove_from_open(self, node: Node):
         self.open.remove(node)
 
     def add_to_closed(self, node: Node):
-        self.closed.append(node)
+        #self.closed.append(node)
+        self.closed.add(node)
 
     def in_closed_list(self, node: Node) -> bool:
         return node in self.closed
@@ -604,7 +633,7 @@ def get_safest_scoring_path(game, player, from_position=None, num_moves_used=Non
 
 class ActionSequence:
 
-    def __init__(self, action_steps: List[Action], score: float = 0, path_score: float = 1.0, action_risk: float = 1.0, description: str = '', ignore_action:bool = False):
+    def __init__(self, action_steps: List[Action], score: float = 0, path_score: float = 1.0, action_risk: float = 1.0, description: str = '', ignore_action:bool = False, is_blitz:bool = False):
         """ Creates a new ActionSequence - an ordered list of sequential Actions to attempt to undertake.
         :param action_steps: Sequence of action steps that form this action.
         :param score: A score representing the attractiveness of the move (default: 0)
@@ -621,6 +650,7 @@ class ActionSequence:
         self.action_risk = action_risk
         self.description = description
         self.ignore_action = ignore_action
+        self.is_blitz = is_blitz
 
     def get_moves_and_gfis(self):
         move_counter = 0
@@ -723,22 +753,22 @@ class FfHeatMap:
             for y in range(height):
                 safety_rating = 0
                 square = self.game.get_square(x, y)
-                in_range_friendly_players = self.free_players_in_range(my_team, square)
-                in_range_opp_players = self.free_players_in_range(opp_team, square)
+                #in_range_friendly_players = self.free_players_in_range(my_team, square)
+                #in_range_opp_players = self.free_players_in_range(opp_team, square)
 
                 adjacent_opp_players = len(self.game.get_adjacent_players(square, standing=False, team=opp_team))
                 adjacent_friendly_players = len(self.game.get_adjacent_players(square, standing=False, team=my_team))
                 adjacent_non_diagonal_players = len(self.game.get_adjacent_players(square, standing=False, team=my_team, diagonal=False))
                 adjacent_diagonal_players = adjacent_friendly_players - adjacent_non_diagonal_players
-                safety_rating += adjacent_diagonal_players
+                safety_rating += 1 * adjacent_diagonal_players
                 safety_rating += .5 * adjacent_non_diagonal_players
 
 
 
-                if in_range_opp_players == 0:
-                    safety_rating += 10
-                else:
-                    safety_rating += (in_range_friendly_players - in_range_opp_players)
+                #if in_range_opp_players == 0:
+                    #safety_rating += 10
+                #else:
+                    #safety_rating += (in_range_friendly_players - in_range_opp_players)
 
                 if adjacent_opp_players > 0:
                     safety_rating -= 10
@@ -781,9 +811,9 @@ class FfHeatMap:
 
         for path in paths:
             if is_friendly:
-                self.units_friendly[path.steps[-1].x][path.steps[-1].y] += path.prob * path.prob
+                self.units_friendly[path.steps[-1].x][path.steps[-1].y] += path.prob * path.prob * (2 + player.get_ma() - len(path))
             else:
-                self.units_opponent[path.steps[-1].x][path.steps[-1].y] += path.prob * path.prob
+                self.units_opponent[path.steps[-1].x][path.steps[-1].y] += path.prob * path.prob * (2 + player.get_ma() - len(path))
 
     def add_unit_by_paths(self, game: Game, paths: Dict[Player, List[Path]]):
         for player in paths.keys():
@@ -1249,6 +1279,8 @@ class MiniGrod(Agent):
         self.debug = False
         self.heat_map: Optional[FfHeatMap] = None
         self.actions_available = []
+        self.current_turn = -1
+        self.current_blitzer = None
 
 
     def set_verbose(self, verbose):
@@ -1405,6 +1437,8 @@ class MiniGrod(Agent):
         self.my_team = team
         self.opp_team = game.get_opp_team(team)
         self.actions_available = []
+        self.current_turn = -1
+        self.current_blitzer = None
 
     def coin_toss_flip(self, game: Game):
         """
@@ -1508,12 +1542,15 @@ class MiniGrod(Agent):
                 player_to_square[los_fodder] = place_square
                 continue
             #someone to pick up the ball
-            if i == 4:
+            if i < 7:
                 players = sorted(players, key=lambda x: player_run_ability(game, x))
                 #for player in players:
                     #print(player.role.name)
                 ball_carrier = players.pop()
-                place_square = game.get_square(reverse_x_for_right(game, self.my_team, 7), 8)
+                y = 8
+                if i == 5: y = 11
+                if i == 6: y = 5
+                place_square = game.get_square(reverse_x_for_right(game, self.my_team, 7), y)
                 player_to_square[ball_carrier] = place_square
                 continue
             #some more on the line as assist -> blockers
@@ -1670,6 +1707,30 @@ class MiniGrod(Agent):
         for player in game.get_players_on_pitch(self.my_team):
             player_actions[player] = []
 
+        move_available = False
+        blitz_available = False
+        foul_available = False
+        block_available = False
+        pass_available = False
+        handoff_available = False
+        end_turn_available = False
+
+        for action_choice in game.state.available_actions:
+            if action_choice.action_type == ActionType.START_MOVE:
+                move_available = True
+            elif action_choice.action_type == ActionType.START_BLITZ:
+                blitz_available = True
+            elif action_choice.action_type == ActionType.START_FOUL:
+                foul_available = True
+            elif action_choice.action_type == ActionType.START_BLOCK:
+                block_available = True
+            elif action_choice.action_type == ActionType.START_PASS:
+                pass_available = True
+            elif action_choice.action_type == ActionType.START_HANDOFF:
+                handoff_available = True
+            elif action_choice.action_type == ActionType.END_TURN:
+                end_turn_available = True
+
         for action_choice in game.state.available_actions:
             if action_choice.action_type == ActionType.START_MOVE:
                 players_available: List[Player] = action_choice.players
@@ -1754,10 +1815,13 @@ class MiniGrod(Agent):
                     if target_square != None:
                         target_player = game.get_player_at(target_square)
                         reserved_players.append(target_player)
+                        #if self.verbose:
+                            #print("TOP PASS ACTION CONSIDERED:")
+                            #self.pretty_print_action(game, top_pass_action)
 
             top_actions : List[ActionSequence] = []
             doing_nothing_actions : List[ActionSequence] = []
-
+            MINIMUM_ACTION_SCORE = 1
             for player in player_actions:
                 if not player in reserved_players:
                     actions = player_actions[player]
@@ -1772,7 +1836,11 @@ class MiniGrod(Agent):
                         elif is_square_reserved and not is_square_reseved_for_me:
                             doing_nothing_actions.append(top_action)
                         else:
-                            top_actions.append(top_action)
+                            if top_action.score >= MINIMUM_ACTION_SCORE:
+                                top_actions.append(top_action)
+                            else:
+                                doing_nothing_actions.append(top_action)
+
 
 
             top_actions.sort(key=lambda x: x.get_risk(), reverse=True)
@@ -1781,6 +1849,9 @@ class MiniGrod(Agent):
                 self.current_move = top_actions[0]
             else:
                 self.current_move = potential_end_turn_action(game)[0]
+
+            if self.current_move.is_blitz:
+                self.current_blitzer = self.current_move.get_player()
 
             if self.verbose:
                 pretty_print_game(game)
@@ -1814,10 +1885,14 @@ class MiniGrod(Agent):
         self.current_move = None
 
         player: Player = game.state.active_player
+
+
         paths = get_all_paths(game, player, from_position=None, num_moves_used=None, allow_skill_reroll=True, max_search_distance=player.num_moves_left() - 1)
 
         all_actions: List[ActionSequence] = []
         for action_choice in game.state.available_actions:
+            if self.verbose:
+                print("Available Continuing Action: {}".format(action_choice.action_type))
             if action_choice.action_type == ActionType.MOVE:
                 players_available: List[Player] = action_choice.players
                 move_actions, pickup_actions = potential_move_actions(game, self.heat_map, player, paths, is_continuation=True)
@@ -1838,7 +1913,7 @@ class MiniGrod(Agent):
         Start a new player action / turn.
         """
 
-        # Simple algorithm: 
+        # Simple algorithm:
         #   Loop through all available (yet to move) players.
         #   Compute all possible moves for all players.
         #   Assign a score to each action for each player.
@@ -1847,11 +1922,21 @@ class MiniGrod(Agent):
 
         #print("MiniGrod starting turn: " + str(game.state.round))
         #pretty_print_game(game)
+        if self.current_turn != self.my_team.state.turn:
+            self.start_of_new_turn(game)
         self.set_next_move(game)
         #next_action: Action = self.current_move.popleft(print_action=True)
         next_action: Action = self.current_move.popleft(print_action=False)
 
         return next_action
+
+    def start_of_new_turn(self, game:Game):
+
+        self.current_turn = self.my_team.state.turn
+        if self.verbose:
+            print("START OF TURN {}".format(self.current_turn))
+            #tracker = StatTracker(game)
+        self.current_blitzer = None
 
     def quick_snap(self, game: Game):
 
@@ -1901,21 +1986,21 @@ class MiniGrod(Agent):
         actions: List[ActionSequence] = []
         is_reroll_available = False
         for action_choice in game.state.available_actions:
-            if action_choice.action_type == ActionType.USE_REROLL:
+            #if action_choice.action_type == ActionType.USE_REROLL:
                 #is_reroll_available = True #this isn't where we can reroll
-                continue
+                #continue
             action_steps: List[Action] = [
                 Action(action_choice.action_type)
                 ]
-            score = block_favourability(action_choice.action_type, self.my_team, active_player, attacker, defender, favor)
+            score = block_favourability(action_choice.action_type, self.my_team, attacker, defender)
             actions.append(ActionSequence(action_steps, score=score, description='Block die choice'))
 
-        if is_reroll_available and check_reroll_block(game, self.my_team, actions, favor):
-            return Action(ActionType.USE_REROLL)
-        else:
-            actions.sort(key=lambda x: x.score, reverse=True)
-            current_move = actions[0]
-            return current_move.action_steps[0]
+        #if is_reroll_available and check_reroll_block(game, self.my_team, actions, favor):
+            #return Action(ActionType.USE_REROLL)
+
+        actions.sort(key=lambda x: x.score, reverse=True)
+        current_move = actions[0]
+        return current_move.action_steps[0]
 
     def push(self, game: Game):
         """
@@ -1994,14 +2079,15 @@ class MiniGrod(Agent):
         else:
             print(f'''I lost''')
         print('------------------')
+        tracker = StatTracker(game)
 
 
 
 
 
-def block_favourability(block_result: ActionType, team: Team, active_player: Player, attacker: Player, defender: Player, favor: Team) -> float:
+def block_favourability(block_result: ActionType, team: Team, attacker: Player, defender: Player) -> float:
 
-    if attacker.team == active_player.team:
+    if attacker.team == attacker.team:
         if block_result == ActionType.SELECT_DEFENDER_DOWN:
             return 6.0
         elif block_result == ActionType.SELECT_DEFENDER_STUMBLES:
@@ -2116,7 +2202,7 @@ def potential_blitz_actions(game: Game, heat_map: FfHeatMap, player: Player, pat
             action_risk = block_risk(game, player, block_target, end_square)
             score = action_score
 
-            move_actions.append(ActionSequence(action_steps, score=score, path_score = path_score, action_risk = action_risk, description='Blitz ' + player.role.name + ' to ' + str(blockable_square.x) + ',' + str(blockable_square.y)))
+            move_actions.append(ActionSequence(action_steps, score=score, path_score = path_score, action_risk = action_risk, description='Blitz ' + player.role.name + ' to ' + str(blockable_square.x) + ',' + str(blockable_square.y), is_blitz=True))
             # potential action -> sequence of steps such as "START_MOVE, MOVE (to square) etc
     return move_actions
 
@@ -2211,9 +2297,9 @@ def potential_foul_actions(game: Game, heat_map: FfHeatMap, player: Player, path
 
 
 def get_foul_risk(game:Game, player:Player, foul_target:Player):
-    #assists = len(game.get_assisting_players_at(player, foul_target, foul=True))
-    #risk = 4.5/6.0 #eh, close enough
-    risk = .5
+    risk = .5 #since this is a permanent ejection on failure, we fudge the risk a little
+    #if player.team.state.bribes > 0: #TODO: commented out until bribes work
+        #risk = .9
     #armor_break_chance = foul_target.get_av() - assists
     return risk
 
@@ -2246,8 +2332,9 @@ def potential_move_actions(game: Game, heat_map: FfHeatMap, player: Player, path
 
         to_square: Square = game.get_square(path_steps[-1].x, path_steps[-1].y)
         action_score, is_complete, description = score_move(game, heat_map, player, to_square)
-        if path_includes_ball:
+        if path_includes_ball and not is_continuation:
             is_complete = False
+            action_steps[0] = Action(ActionType.START_HANDOFF, player=player)
         if is_complete:
             action_steps.append(Action(ActionType.END_PLAYER_TURN, player=player))
 
@@ -2381,13 +2468,17 @@ def score_foul(game: Game, heat_map: FfHeatMap, attacker: Player, defender: Play
     if defender.state.stunned:
         score = score - 15.0
 
-    if game.state.half == 1:
-        score += 5.0
-    else:
-        score -= 40.0
+    #if game.state.half == 1:
+        #score += 5.0
+    #else:
+        #score -= 40.0
+
     assists_for, assists_against = game.num_assists_at(attacker, defender, to_square, foul=True)
     if attacker.has_skill(Skill.CHAINSAW):
         assists_for += 3
+    if attacker.has_skill(Skill.DIRTY_PLAYER):
+        assists_for += 1
+    #assists_for += attacker.team.state.bribes #TODO: commented out until bribes work
     #score = score + (assists_for-assists_against) * 15.0
     modified_av = max(2, defender.get_av() - assists_for + assists_against)
     if  modified_av <= 5:
@@ -2429,6 +2520,8 @@ def score_move(game: Game, heat_map: FfHeatMap, player: Player, to_square: Squar
     enabled_sweep = False
     enabled_caging = True
     enabled_mark_opponent = True
+    enabled_receiving = True
+
 
     if enabled_move_toward_ball:
         scores.append((score_move_towards_ball(game, heat_map, player, to_square), 'move toward ball'))
@@ -2439,9 +2532,15 @@ def score_move(game: Game, heat_map: FfHeatMap, player: Player, to_square: Squar
     if enabled_sweep:
         scores.append((score_sweep(game, heat_map, player, to_square), 'move to sweep'))
     if enabled_caging:
-        scores.append((score_caging(game, heat_map, player, to_square), 'move to cage'))
+        #scores.append((score_caging(game, heat_map, player, to_square), 'move to cage'))
+        #scores.append((score_line_caging(game, heat_map, player, to_square), 'move to line cage'))
+        pass
     if enabled_mark_opponent:
-        scores.append((score_mark_opponent(game, heat_map, player, to_square), 'move to mark opponent'))
+        #scores.append((score_mark_opponent(game, heat_map, player, to_square), 'move to mark opponent'))
+        scores.append((score_offensive_marking(game, heat_map, player, to_square), 'move to mark opponent'))
+
+    if enabled_receiving:
+        scores.append((score_receiving_position(game, heat_map, player, to_square), 'move to receiver'))
 
     scores.sort(key=lambda tup: tup[0], reverse=True)
     score, description = scores[0]
@@ -2458,10 +2557,10 @@ def score_move(game: Game, heat_map: FfHeatMap, player: Player, to_square: Squar
 
 
 def score_receiving_position(game: Game, heat_map: FfHeatMap, player: Player, to_square: Square) -> (float, bool):
-    return 0.0, True
+    return 0.0
     ball_carrier = game.get_ball_carrier()
     if ball_carrier is not None and (player.team != ball_carrier.team or player == game.get_ball_carrier()):
-        return 0.0, True
+        return 0.0
 
     receivingness = player_receiver_ability(game, player)
     score = receivingness - 30.0
@@ -2486,7 +2585,7 @@ def score_receiving_position(game: Game, heat_map: FfHeatMap, player: Player, to
     if players_in(game, player.team, squares_within(game, to_square, 2), include_opp=False, include_own=True):
         score -= 20.0
 
-    return score, True
+    return score
 
 
 def score_move_towards_ball(game: Game, heat_map: FfHeatMap, player: Player, to_square: Square) -> float:
@@ -2633,16 +2732,16 @@ def score_move_ball(game: Game, heat_map: FfHeatMap, player: Player, to_square: 
         #score = MiniGrod.BASE_SCORE_MOVE_BALL
         score = ScoreMoveBall.BASE_MOVE_BALL_SCORE
 
-
+    turns_remaining = 8 - player.team.state.turn # 0-7
     if in_scoring_endzone(game, player.team, to_square):
-        if player.team.state.turn == 8:
-            score += 1000.0  # Make overwhelmingly attractive
+        if turns_remaining == 0:
+            score += 1500.0  # Make overwhelmingly attractive
         else:
             score += 500.0  # Make scoring attractive
-    elif player.team.state.turn == 8:
+    elif turns_remaining == 0:
         score -= 1000.0  # If it's the last turn, heavily penalyse a non-scoring action
     else:
-        score += heat_map.get_ball_move_square_safety_score(to_square)
+        score += .5 * turns_remaining * heat_map.get_ball_move_square_safety_score(to_square)
         opps: List[Player] = game.get_adjacent_players(to_square, team=game.get_opp_team(player.team), stunned=False)
         if opps:
             score -= (40.0 + 20.0 * len(opps))
@@ -2654,7 +2753,7 @@ def score_move_ball(game: Game, heat_map: FfHeatMap, player: Player, to_square: 
 
         dist_player = distance_to_scoring_endzone(game, player.team, player.position)
         dist_destination = distance_to_scoring_endzone(game, player.team, to_square)
-        score += 10.0 * (dist_player - dist_destination)  # Increase score the closer we get to the scoring end zone
+        score += 15.0 * (dist_player - dist_destination)  # Increase score the closer we get to the scoring end zone
 
         turns_remaining = 8 - player.team.state.turn
         max_scoring_range = (player.get_ma() + 2) * turns_remaining
@@ -2817,7 +2916,7 @@ def score_caging(game: Game, heat_map: FfHeatMap, player: Player, to_square: Squ
             if dist_opp_to_ball > avg_opp_ma:
                 score -= 30.0
             if not ball_carrier.state.used:
-                score -= 30.0
+                score -= 1000.0
             if to_square.is_adjacent(game.get_ball_position()):
                 score += 5
             if is_bishop_position_of(game, player, ball_carrier):
@@ -2830,6 +2929,62 @@ def score_caging(game: Game, heat_map: FfHeatMap, player: Player, to_square: Squ
             return score
 
     return 0
+
+
+def score_line_caging(game: Game, heat_map: FfHeatMap, player: Player, to_square: Square) -> float:
+
+    ball_carrier: Player = game.get_ball_carrier()
+
+    if ball_carrier is None or ball_carrier.team != player.team or ball_carrier == player:
+        return 0.0          # Noone has the ball.  Don't try to cage.
+    if not ball_carrier.state.used:
+        return 0.0
+    ball_square: Square = game.get_ball_position()
+    line_cage_players = game.get_adjacent_players(ball_square, team=player.team, diagonal=False, down=False)
+    #for player in line_cage_players:
+
+    x_off_by_one = abs(to_square.x - ball_square.x) == 1
+    y_off_by_one = abs(to_square.y - ball_square.y) == 1
+    x_off_by_zero = abs(to_square.x - ball_square.x) == 0
+    y_off_by_zero = abs(to_square.y - ball_square.y) == 0
+
+    is_line_cage_square = (x_off_by_one and y_off_by_zero) or (y_off_by_one and x_off_by_zero)
+    if not is_line_cage_square:
+        return 0.0
+
+
+    score = ScoreCage.BASE_CAGE_SCORE
+    score += get_average_cage_score(game, to_square, heat_map)
+
+    return score
+
+def score_offensive_marking(game: Game, heat_map: FfHeatMap, player: Player, to_square: Square) -> float:
+    ball_pos = game.get_ball_position()
+    ball_carrier = game.get_ball_carrier()
+    if ball_carrier == player:
+        return 0.0
+    opp_team = game.get_opp_team(player.team)
+    is_on_defense = ball_carrier != None and ball_carrier.team == opp_team
+
+    all_opponents: List[Player] = game.get_adjacent_players(to_square, team=opp_team)
+    #all_opponents.sort(key=lambda opp: opp.position.distance(ball_pos))
+
+    score = 0
+    if is_on_defense and to_square.is_adjacent(ball_pos):
+        score += 30.0
+    for opponent in all_opponents:
+        if to_square.is_adjacent(opponent.position):
+            score = ScoreMarkOpponent.BASE_MARK_OPPONENT
+            score += 5 * (8 - opponent.position.distance(ball_pos))
+            if len(game.get_adjacent_players(opponent.position, team=player.team, down=False)) > 0:
+                if to_square in heat_map.assist_squares:
+                    score += 30.0
+                else:
+                    score = 0
+
+
+
+    return score
 
 def get_average_cage_score(game: Game, to_square: Square, heat_map: FfHeatMap):
     score = heat_map.get_cage_necessity_score(to_square)
@@ -2952,7 +3107,7 @@ def score_handoff(game: Game, heat_map: FfHeatMap, ball_carrier: Player, receive
 def score_pass(game: Game, heat_map: FfHeatMap, passer: Player, from_square: Square, to_square: Square, is_handoff: bool = False) -> float:
 
     pass_score = ScorePass()
-    receiver = game.get_player_at(to_square)
+    receiver:Player = game.get_player_at(to_square)
 
     if receiver is None:
         pass_score.no_receiver()
@@ -2969,6 +3124,12 @@ def score_pass(game: Game, heat_map: FfHeatMap, passer: Player, from_square: Squ
     if not receiver.state.up:
         pass_score.receiver_down()
         return pass_score.get_score()
+
+    receiver_x = reverse_x_for_left(game, receiver.team, receiver.position.x)
+    passer_x = reverse_x_for_left(game, passer.team, passer.position.x)
+    delta_x = passer_x - receiver_x
+    pass_score.add_downfield_bonus(delta_x * 50)
+
 
     #score += probability_fail_to_score(probability_catch_fail(game, receiver))
     #dist: PassDistance = game.get_pass_distance(from_square, receiver.position)
@@ -3069,9 +3230,13 @@ def score_block(game: Game, heat_map: FfHeatMap, attacker: Player, defender: Pla
             else:
                 score -= 1000.0
 
+
+
             if len(game.get_adjacent_opponents(attacker, stunned=False, down=False)) == 1:
-                # we may need to blitz ourselves free
-                score += 150.0
+                if attacker.position == blitz_square:
+                    score += 250.0
+                    if in_scoring_range(game, attacker):
+                        score += 550.0
             elif len(game.get_adjacent_opponents(attacker, stunned=False, down=False)) > 1 and game.get_adjacent_players(defender.position, game.get_opp_team(attacker.team), down=False, stunned=False):
                 score += 30.0
             else:
@@ -3108,6 +3273,8 @@ def check_follow_up(game: Game) -> bool:
     for position in game.state.available_actions[0].positions:
         if active_player.position != position:
             follow_up_square: Square = position
+        else:
+            current_square = position
 
     defender_prone = (block_proc.selected_die == BBDieResult.DEFENDER_DOWN) or ((block_proc.selected_die == BBDieResult.DEFENDER_STUMBLES) and (attacker.has_skill(Skill.TACKLE) or not defender.has_skill(Skill.DODGE)))
 
@@ -3118,9 +3285,9 @@ def check_follow_up(game: Game) -> bool:
 
     num_tz_new -= defender_prone
 
-    #do_print = True
-    #if do_print:
-        #print("FOLLOW UP DEBUG: current_tz: {}, new_tz: {}, opp_adj_cur: {}, opp_adj_new: {}".format(num_tz_cur, num_tz_new, opp_adj_cur, opp_adj_new))
+    do_print = True
+    if do_print:
+        print("FOLLOW UP DEBUG: current_tz: {}, new_tz: {}, opp_adj_cur: {}, opp_adj_new: {}".format(num_tz_cur, num_tz_new, opp_adj_cur, opp_adj_new))
 
     # If blitzing (with squares of movement left) always follow up if the new square is not in any tackle zone.
     if is_blitz_action and attacker.num_moves_left() > 0 and num_tz_new == 0:
@@ -3140,9 +3307,9 @@ def check_follow_up(game: Game) -> bool:
         return False    # No if moving to sideline
     if distance_to_sideline(game, defender.position) == 0:
         return True  # Follow up if opponent is on sideline
-    if follow_up_square.is_adjacent(game.get_ball_position()):
+    if follow_up_square.is_adjacent(game.get_ball_position()) and not current_square.is_adjacent(game.get_ball_position()):
         return True  # Follow if moving next to ball
-    if attacker.position.is_adjacent(game.get_ball_position()):
+    if current_square.is_adjacent(game.get_ball_position()) and not follow_up_square.is_adjacent(game.get_ball_position()):
         return False  # Don't follow if already next to ball
 
     # Follow up if less standing opponents in the next square or equivalent, but defender is now prone
@@ -3197,7 +3364,7 @@ def check_reroll_block(game: Game, team: Team, block_results: List[ActionSequenc
 def get_best_block_score(block_results, team, attacker, defender, favor):
     best_score = -1.0
     for block_result in block_results:
-        score = block_favourability(block_result.action_type, team, attacker, attacker, defender, favor)
+        score = block_favourability(block_result.action_type, team, attacker, defender)
         if score >= best_score:
             best_score = score
     return best_score
@@ -3656,7 +3823,7 @@ class ScoreMoveBall(Score):
 
 
 class ScorePickup(Score):
-    BASE_PICKUP_SCORE = 170
+    BASE_PICKUP_SCORE = 300
     REROLL_AVAILABLE = 45
     def __init(self):
         super().__init__()
@@ -3741,6 +3908,431 @@ class ScorePass(Score):
     def other_team_receiver(self):
         self.score = 0
         self.add_note(0, "Opposing team player occupies square.")
+
+    def add_downfield_bonus(self, bonus):
+        self.score += bonus
+        self.add_note(bonus, "Reciever farther downfield than passer")
+
+
+#After a game is complete, goes through and compiles some useful(?) stats
+class StatTracker:
+    def __init__(self, game):
+        self.parse_reports(game)
+    #players left stranded
+    #causes of turnovers
+    #1/9 failures
+    #1/36 failures
+    #pickup failures
+    #handoff failures
+    #pass/catch failures
+    #dodge failures
+    #armor/injury over/under performance
+    #scored/didn't score in x turns receiving/kicking
+    #number of ball blitzes allowed
+    #ball blitz results
+
+    target_dice_to_percent = {
+        12: 1 / 36.0,
+        11: 3 / 36.0,
+        10: 6 / 36.0,
+        9: 10 / 36.0,
+        8: 15 / 36.0,
+        7: 21 / 36.0,
+        6: 26 / 36.0,
+        5: 30 / 36.0,
+        4: 33 / 36.0,
+        3: 35 / 36.0,
+        2: 36 / 36.0,
+
+    }
+
+
+    def parse_reports(self, game: Game):
+        team_a = game.get_kicking_team(1)
+        team_b = game.get_kicking_team(2)
+        self.team_a_turnovers = self.parse_turnover_causes(game, team_a)
+        self.team_b_turnovers = self.parse_turnover_causes(game, team_b)
+        self.team_a_dodge_report = self.parse_dodge_results(game, team_a)
+        self.team_b_dodge_report = self.parse_dodge_results(game, team_b)
+        self.team_a_attrition_report = self.parse_attrition(game, team_a)
+        self.team_b_attrition_report = self.parse_attrition(game, team_b)
+        self.drives = self.parse_drives(game)
+
+        agent_name_a = game.get_team_agent(team_a).name
+        agent_name_b = game.get_team_agent(team_b).name
+
+        team_names = {team_a.team_id : agent_name_a, team_b.team_id : agent_name_b}
+
+        print("GAME STATS:")
+
+        print("TURNOVER REPORT:")
+        print("{}:".format(agent_name_a))
+        for cause in self.team_a_turnovers:
+            print(cause.outcome_type)
+        print("{}:".format(agent_name_b))
+        for cause in self.team_b_turnovers:
+            print(cause.outcome_type)
+
+        print("DODGE REPORT:")
+        self.team_a_dodge_report.print_summary(agent_name_a)
+        self.team_b_dodge_report.print_summary(agent_name_b)
+
+        print("ATTRITION REPORT:")
+        self.team_a_attrition_report.print_summary(agent_name_a)
+        self.team_b_attrition_report.print_summary(agent_name_b)
+
+        print("DRIVE RESULTS:")
+        for drive in self.drives:
+            drive.print_summary(team_names[drive.team.team_id])
+
+
+
+    class Drive:
+        def __init__(self, receiving_team: Team):
+            self.team = receiving_team
+            self.turns = 0
+            self.result = 0
+            self.kickoff_event:Outcome = None
+            self.name = "Unset Name"
+            self.weather:WeatherType = WeatherType.NICE
+
+
+
+        def set_agent_name(self, game:Game):
+            self.name = game.get_team_agent(self.team).name
+
+        def add_turn(self):
+            self.turns +=1
+
+        def end_drive(self):
+            pass
+
+        def offensive_touchdown(self):
+            self.result = 1
+
+
+        def defensive_touchdown(self):
+            self.result = -1
+
+        def add_kickoff_event(self, outcome:Outcome):
+            self.kickoff_event = outcome
+
+        def print_summary(self, name):
+            if self.turns == 0:
+                return
+            result_string = "was unable to score."
+            if self.result == 1:
+                result_string == "scored a touchdown."
+            if self.result == -1:
+                result_string == "gave up a touchdown."
+
+            kickoff_string = "None"
+            if self.kickoff_event != None:
+                kickoff_string = str(self.kickoff_event.outcome_type)
+
+            signed_result = self.result
+            if self.result == 1:
+                signed_result = "+1"
+            print("{} received the ball. {} turns. score: {}. Kickoff event: {}. {}".format(name, self.turns, signed_result, kickoff_string, str(self.weather)))
+
+    class DodgeReport:
+        def __init__(self):
+            self.dodges_attempted = 0
+            self.dodges_succeeded = 0
+            self.dodges_attempted_with_dodge = 0
+            self.dodges_succeeded_with_dodge = 0
+
+        def print_summary(self, team_name):
+            print("DODGES (SUCCEEDED/ATTEMPTED) by {}".format(team_name))
+            for i in range(2, 7):
+                print("{}+ : {}/{} ({:.1f}%)".format(i, int(self.dodges_succeeded[i]), self.dodges_attempted[i], 100 * (self.dodges_succeeded[i] / (self.dodges_attempted[i] + .0001))))
+            print("DODGES WITH DODGE:")
+            for i in range(2, 7):
+                print("{}+(r) : {}/{} ({:.1f}%)".format(i, int(self.dodges_succeeded_with_dodge[i]), self.dodges_attempted_with_dodge[i], 100 * (self.dodges_succeeded_with_dodge[i] / (self.dodges_attempted_with_dodge[i] + .0001))))
+
+    class AttritionReport:
+        def __init__(self):
+            self.expected_kos = 0
+            self.expected_cas = 0
+            self.actual_kos = 0
+            self.actual_cas = 0
+            self.expected_pow = 0
+            self.actual_pow = 0
+            self.blocks = {1: 0, 2: 0, 3: 0}
+            self.fouls = 0
+            self.ejections = 0
+            self.crowdsurfs = 0
+
+
+        def print_summary(self, name):
+            print("ATTRITION REPORT (EXPECTED/ACTUAL) for {}".format(name))
+            print("KOS: {:.2f} / {}".format(self.expected_kos, self.actual_kos))
+            print("CAS: {:.2f} / {}".format(self.expected_cas, self.actual_cas))
+            print("DEPITCH: {:.2f} / {}".format(self.expected_cas + self.expected_kos, self.actual_cas + self.actual_kos))
+
+            for i in [3, 2, 1]:
+                print("BLOCKS_{}d: {}".format(i, self.blocks[i]))
+            print("POWS: {:.2f}/{}".format(self.expected_pow, self.actual_pow))
+
+            print("FOULS: {}".format(self.fouls))
+            print("EJECTIONS: {}".format(self.ejections))
+            print("CROWDSURFS: {}".format(self.crowdsurfs))
+
+    def parse_drives(self, game):
+        reports = game.state.reports
+
+        kickoff_events = [
+            OutcomeType.KICKOFF_BLITZ,
+            OutcomeType.KICKOFF_BRILLIANT_COACHING,
+            OutcomeType.KICKOFF_CHANGING_WHEATHER,
+            OutcomeType.KICKOFF_CHEERING_FANS,
+            OutcomeType.KICKOFF_GET_THE_REF,
+            OutcomeType.KICKOFF_HIGH_KICK,
+            OutcomeType.KICKOFF_PERFECT_DEFENSE,
+            OutcomeType.KICKOFF_PITCH_INVASION,
+            OutcomeType.KICKOFF_QUICK_SNAP,
+            OutcomeType.KICKOFF_RIOT,
+            OutcomeType.KICKOFF_THROW_A_ROCK,
+        ]
+
+        current_weather = WeatherType.NICE
+
+        drives : List[StatTracker.Drive] = []
+
+        current_drive = StatTracker.Drive(game.get_receiving_team(1))
+        current_drive.set_agent_name(game)
+        current_drive.weather = current_weather
+        drives.append(current_drive)
+        for outcome in reports:
+            if outcome.outcome_type == OutcomeType.END_OF_FIRST_HALF:
+                current_drive = StatTracker.Drive(game.get_receiving_team(2))
+                current_drive.set_agent_name(game)
+                current_drive.weather = current_weather
+                drives.append(current_drive)
+            if outcome.outcome_type == OutcomeType.TOUCHDOWN:
+                if outcome.team == current_drive.team:
+                    current_drive.offensive_touchdown()
+                    current_drive = StatTracker.Drive(game.get_opp_team(current_drive.team))
+                else:
+                    current_drive.defensive_touchdown()
+                    current_drive = StatTracker.Drive(current_drive.team)
+                drives.append(current_drive)
+
+                current_drive.weather = current_weather
+            if outcome.outcome_type == OutcomeType.TURN_START:
+                if outcome.team == current_drive.team:
+                    current_drive.add_turn()
+            if outcome.outcome_type in kickoff_events:
+                current_drive.add_kickoff_event(outcome)
+            if outcome.outcome_type in [OutcomeType.WEATHER_BLIZZARD, OutcomeType.WEATHER_NICE, OutcomeType.WEATHER_POURING_RAIN, OutcomeType.WEATHER_SWELTERING_HEAT, OutcomeType.WEATHER_VERY_SUNNY]:
+                current_drive.weather = outcome.outcome_type
+        return drives
+
+
+
+    def parse_attrition(self, game:Game, team:Team) -> AttritionReport:
+        reports = game.state.reports
+        outcome: Outcome
+
+        expected_kos = 0.0
+        expected_cas = 0.0
+        expected_pows = 0.0
+        total_blocks = {1: 0, 2: 0, 3: 0}
+
+        for i, outcome in enumerate(reports):
+            if outcome.outcome_type == OutcomeType.BLOCK_ROLL and reports[i + 1] != OutcomeType.REROLL_USED: #TODO: Does this catch Pro reroll?
+
+                attacker:Player = outcome.player
+                if attacker.team != team:
+                    continue
+                defender:Player  = outcome.opp_player
+                #print("{} vs {} : {}".format(attacker.role.name, defender.role.name, outcome.to_json()))
+                dice_num = len(outcome.rolls[0].dice)
+                pow_odds = self.chance_to_pow(attacker, defender, dice_num)
+                ko_odds, cas_odds = self.get_attrition_odds(attacker, defender)
+                expected_pows += pow_odds
+                expected_kos += pow_odds * ko_odds
+                expected_cas += pow_odds * cas_odds
+                total_blocks[dice_num] += 1
+
+        actual_pows = 0
+        for outcome in reports:
+            if outcome.outcome_type == OutcomeType.KNOCKED_DOWN: #TODO: is this catching dodge and gfi failures?
+                if outcome.player.team != team:
+                    actual_pows += 1
+
+        fouls = 0
+        ejected = 0
+        surfs = 0
+        for outcome in reports:
+            if outcome.outcome_type == OutcomeType.FOUL:
+                if outcome.player.team == team:
+                    fouls += 1
+            if outcome.outcome_type == OutcomeType.PLAYER_EJECTED:
+                if outcome.player.team == team:
+                    ejected += 1
+            if outcome.outcome_type == OutcomeType.PUSHED_INTO_CROWD:
+                if outcome.player.team != team:
+                    surfs += 1
+
+        #TODO: fouls, sideline pushes, hit by a rock?, throw teammate?, dodge and gfi fails?
+        actual_kos = 0
+        actual_cas = 0
+        #actual_depitch = 0
+
+        for i, outcome in enumerate(reports):
+            if outcome.outcome_type == OutcomeType.KNOCKED_OUT:
+                if outcome.player.team == team:
+                    continue
+                actual_kos += 1
+            if outcome.outcome_type == OutcomeType.CASUALTY:
+                if outcome.player.team == team:
+                    continue
+                if reports[i + 1].outcome_type != OutcomeType.CASUALTY: #for some reason, these tend to come in pairs?
+                    actual_cas += 1
+
+        attrition_report = StatTracker.AttritionReport()
+        attrition_report.blocks = total_blocks
+        attrition_report.actual_kos = actual_kos
+        attrition_report.actual_cas = actual_cas
+        attrition_report.actual_pow = actual_pows
+        attrition_report.expected_kos = expected_kos
+        attrition_report.expected_cas = expected_cas
+        attrition_report.expected_pow = expected_pows
+        attrition_report.fouls = fouls
+        attrition_report.ejections = ejected
+        attrition_report.crowdsurfs = surfs
+        return attrition_report
+
+
+
+
+    def chance_to_pow(self, attacker: Player, defender: Player, num_of_dice: int): #TODO: What about red dice blocks?
+        base_chance = 1
+        if not defender.has_skill(Skill.DODGE) or attacker.has_skill(Skill.TACKLE):
+            base_chance += 1
+        if attacker.has_skill(Skill.BLOCK) and not (defender.has_skill(Skill.BLOCK) or defender.has_skill(Skill.WRESTLE)):
+            base_chance += 1
+        chance_per_die = base_chance / 6.0
+        total_chance = 1 - pow(1 - chance_per_die, num_of_dice)
+        return total_chance
+
+    def get_attrition_odds(self, attacker:Player, defender:Player) -> (float, float):
+        av = defender.get_av()
+        if attacker.has_skill(Skill.CLAWS):
+            av = min(7, av)
+        av += 1 #have to exceed av to get an armor break
+        if attacker.has_skill(Skill.MIGHTY_BLOW):
+            av -= 1
+        chance_to_break = self.target_dice_to_percent[av]
+
+        chance_to_ko = 5 / 36.0 + 4 / 36.0 # on an 8 or a 9
+        if defender.has_skill(Skill.THICK_SKULL): #TODO: stunty, twitchy, niggling
+            chance_to_ko = 4 / 36.0
+        chance_to_cas = self.target_dice_to_percent[10]
+        if attacker.has_skill(Skill.MIGHTY_BLOW):
+            chance_to_use_mb_on_injury = self.target_dice_to_percent[av + 1] / self.target_dice_to_percent[av] #the amount of the time we didn't have to use mighty blow on the armor roll
+            chance_to_cas = ((1 - chance_to_use_mb_on_injury) * self.target_dice_to_percent[10]) + (chance_to_use_mb_on_injury *  self.target_dice_to_percent[9])
+            if not defender.has_skill(Skill.THICK_SKULL):
+                chance_to_ko = ((1 - chance_to_use_mb_on_injury) * (5 / 36.0 + 4 / 36.0)) + (chance_to_use_mb_on_injury * (6 / 36.0 + 5 / 36.0))
+            else:
+                chance_to_ko = ((1 - chance_to_use_mb_on_injury) * (0 / 36.0 + 4 / 36.0)) + (chance_to_use_mb_on_injury * (0 / 36.0 + 5 / 36.0))
+
+        chance_to_ko = chance_to_break * chance_to_ko
+        chance_to_cas = chance_to_break * chance_to_cas
+        return (chance_to_ko, chance_to_cas)
+
+
+
+
+
+
+    def parse_dodge_results(self, game: Game, team) -> DodgeReport:
+        reports = game.state.reports
+        outcome: Outcome
+        dodges_attempted = {2:0, 3:0, 4:0, 5:0, 6:0}
+        dodges_succeeded = {2: 0, 3: 0, 4: 0, 5: 0, 6: 0}
+
+        dodges_attempted_with_dodge = {2:0, 3:0, 4:0, 5:0, 6:0}
+        dodges_succeeded_with_dodge = {2:0, 3:0, 4:0, 5:0, 6:0}
+
+
+
+
+        for i, outcome in enumerate(reports):
+            if outcome.outcome_type == OutcomeType.SUCCESSFUL_DODGE or outcome.outcome_type == OutcomeType.FAILED_DODGE:
+                dodge_failed = outcome.outcome_type == OutcomeType.FAILED_DODGE
+                player = outcome.player
+                if player.team != team:
+                    continue
+                roll:DiceRoll = outcome.rolls[0] #roll: {'dice': [{'die_type': 'D6', 'result': 4}], 'sum': 4, 'target': 4, 'modifiers': 1, 'modified_target': 3, 'result': 5, 'roll_type': 'AGILITY_ROLL', 'target_higher': True, 'target_lower': False, 'highest_succeed': True, 'lowest_fail': True}
+                target = roll.modified_target()
+
+                if not player.has_skill(Skill.DODGE):
+                    dodges_attempted[target] += 1
+                    if not dodge_failed:
+                        dodges_succeeded[target] += 1
+                else:
+                    if not dodge_failed:
+                        dodges_attempted_with_dodge[target] += 1
+                        dodges_succeeded_with_dodge[target] += 1
+                    else:
+                        #for x in range(-4, 4):
+                           # print(reports[i + x].outcome_type)
+                        if reports[i + 1].outcome_type != OutcomeType.SKILL_USED: #we failed and already used the skill(TODO: did we? what about tackle)
+                            dodges_attempted_with_dodge[target] += 1
+        dodge_report = StatTracker.DodgeReport()
+        dodge_report.dodges_attempted = dodges_attempted
+        dodge_report.dodges_succeeded = dodges_succeeded
+        dodge_report.dodges_attempted_with_dodge = dodges_attempted_with_dodge
+        dodge_report.dodges_succeeded_with_dodge = dodges_succeeded_with_dodge
+        return dodge_report
+
+
+
+    def parse_turnover_causes(self, game, team):
+        TURNOVER_CAUSES = [
+            OutcomeType.BLOCK_ROLL,
+            OutcomeType.FUMBLE,
+            OutcomeType.INACCURATE_PASS,
+            OutcomeType.FAILED_CATCH,
+            # OutcomeType.BALL_DROPPED,
+            OutcomeType.PLAYER_EJECTED,
+            OutcomeType.INTERCEPTION,
+            OutcomeType.FAILED_GFI,
+            OutcomeType.FAILED_DODGE,
+            OutcomeType.FAILED_PICKUP,
+            OutcomeType.BALL_DROPPED,  # covers a variety of unusual turnovers, piling on with ball carrier, throwing a goblin with ball
+            OutcomeType.TURN_START,  # failsafe if we can't find anything else
+
+            # throw bomb injures teammate?
+        ]
+
+        reports = game.state.reports
+        outcome:Outcome
+        turnover_indexes = []
+        for i, outcome in enumerate(reports):
+            if outcome.outcome_type == OutcomeType.TURNOVER and outcome.team == team:
+                turnover_indexes.append(i)
+
+        turnover_causes = []
+        for index in turnover_indexes:
+            most_recent_outcome:Outcome = reports[index]
+            i = 0
+            while(not (most_recent_outcome.outcome_type in TURNOVER_CAUSES)):
+                i += 1
+                most_recent_outcome = reports[index - i]
+
+            turnover_causes.append(most_recent_outcome)
+        return turnover_causes
+
+        #for team_id, causes in turnover_causes_by_team.items():
+            #team:Team = game.get_team_by_id(team_id)
+            #print("Turnover causes for: {} ".format(game.get_team_agent(team).name))
+            #cause:Outcome
+            #for cause in causes:
+                #print(cause.outcome_type)
+
 
 # Register bot
 #register_bot('miniGrod', miniGrod)
